@@ -7,6 +7,7 @@ scenario fails, that's a real bug — see NOTES.md for the ones this caught.
 import json
 import pathlib
 import re
+import sys
 
 from app.agent import run_agent
 
@@ -78,7 +79,9 @@ def main():
         print(f"[{'PASS' if ok else 'FAIL'}] {s['name']}: {msg}")
         passed += ok
     print(f"\n{passed}/{len(SCENARIOS)} passed")
+    return passed == len(SCENARIOS)
 
 
 if __name__ == "__main__":
-    main()
+    # Non-zero exit on any failure, so CI marks the run red.
+    sys.exit(0 if main() else 1)

@@ -1,5 +1,7 @@
 """FastAPI entrypoint. This layer is done — it validates input and calls the
 agent. You shouldn't need to change much here; the work is in agent.py."""
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -7,11 +9,16 @@ from pydantic import BaseModel
 from app.agent import run_agent
 from app.llm import LLMUnavailable
 
+logger = logging.getLogger("uvicorn.error")
+
 app = FastAPI(title="Mwalimu", description="AI project-guide for coding learners")
 
 
 @app.exception_handler(LLMUnavailable)
 def llm_unavailable(request: Request, exc: LLMUnavailable):
+    # The caller gets a generic message; the reason (bad key, outage,
+    # refusal) goes to the logs, or a misconfiguration looks like an outage.
+    logger.warning("model unavailable: %s", exc)
     return JSONResponse(
         status_code=503,
         content={"detail": "The hint service is temporarily unavailable. Please try again."},
@@ -36,7 +43,7 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/hint", response_model=HintResponse)
+@app.post("/v1/hint", response_model=HintResponse)
 def hint(req: HintRequest):
     result = run_agent(
         brief=req.brief,

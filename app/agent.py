@@ -25,7 +25,8 @@ class State(TypedDict):
     code: str
     rubric: str
     prior_hints: list[str]
-    test_output: str
+    test_status: str   # one of the tools.* statuses; what decide_level branches on
+    test_output: str   # the human-readable result that goes into the hint prompt
     hint_level: int
     hint: str
     solved_leak_blocked: bool
@@ -54,7 +55,9 @@ _FENCED_BLOCK = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 def assess(state: State) -> State:
     """Run the learner's code against the rubric's tests and summarise where
     they are. Sees only code + rubric."""
-    state["test_output"] = tools.run_tests(state["brief"], state["code"], state["rubric"])
+    result = tools.run_tests(state["brief"], state["code"], state["rubric"])
+    state["test_status"] = result.status
+    state["test_output"] = result.message
     return state
 
 
@@ -64,9 +67,7 @@ def decide_level(state: State) -> State:
     concrete), plus a bump if their code doesn't even run — that's a sign
     they're stuck on something more fundamental than a gentle nudge can fix,
     so skip past the pure Socratic-question level."""
-    stuck_on_fundamentals = any(
-        marker in state["test_output"] for marker in ("errored", "timed out")
-    )
+    stuck_on_fundamentals = state["test_status"] in (tools.ERRORED, tools.TIMEOUT, tools.EMPTY)
     level = 1 + len(state["prior_hints"]) + (1 if stuck_on_fundamentals else 0)
     state["hint_level"] = max(1, min(level, 3))
     return state
@@ -143,7 +144,7 @@ _graph = _build_graph()
 def run_agent(brief: str, code: str, rubric: str, prior_hints: list[str]) -> dict:
     state: State = {
         "brief": brief, "code": code, "rubric": rubric,
-        "prior_hints": prior_hints, "test_output": "",
+        "prior_hints": prior_hints, "test_status": "", "test_output": "",
         "hint_level": 1, "hint": "", "solved_leak_blocked": False,
         "leak_retries": 0, "needs_retry": False,
     }

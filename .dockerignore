@@ -1,0 +1,9 @@
+.git
+.github
+.venv
+.env
+.claude
+__pycache__
+*.pyc
+tests
+evals

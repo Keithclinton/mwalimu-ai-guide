@@ -19,7 +19,7 @@ catches regressions.
 learner code + brief + rubric
         │
         ▼
-   FastAPI  POST /hint                          (app/main.py)
+   FastAPI  POST /v1/hint                       (app/main.py)
         │
         ▼
    LangGraph StateGraph                          (app/agent.py)
@@ -50,12 +50,15 @@ learner code + brief + rubric
 
 ## Why it's built this way (the interesting decisions)
 
-- **Context engineering.** Each node sees only what it needs —
-  `context.for_assess` gets the rubric, code, and test output (not prior
-  hints); `context.for_hint` gets the brief, where they're stuck, and hints
-  already given (so it doesn't repeat itself), but never the raw test
-  output verbatim beyond what's needed. Deciding what's in scope at each
-  step, and why, is the actual point of the project. (`app/context.py`)
+- **Context engineering.** Each step sees only what it needs —
+  `context.for_assertions` gets the brief, rubric, and code (for the
+  signature), but not prior hints or test output; `context.for_hint` gets
+  the brief, the test result, and hints already given (so it doesn't repeat
+  itself), plus the learner's code only at levels 2–3, where pointing at a
+  line needs it. Anything the learner controls goes in wrapped in tags the
+  system prompt marks as data, not instructions. Deciding what's in scope
+  at each step, and why, is the actual point of the project.
+  (`app/context.py`)
 - **Hint, don't solve — with a bounded retry, not just a flag.** A
   heuristic check (`agent._hint_leaks_solution`) looks for a `def` matching
   the learner's function followed by a `return` — i.e. "did this read like
@@ -96,7 +99,7 @@ missing and how I'd actually sandbox this for production.
 git clone <this-repo-url>
 cd mwalimu-ai-guide
 
-python -m venv .venv
+python -m venv .venv             # Python 3.10+ (3.12 matches Docker and CI)
 source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
@@ -108,17 +111,59 @@ uvicorn app.main:app --reload
 
 ```bash
 # in another terminal
-curl -X POST localhost:8000/hint -H "content-type: application/json" \
+curl -X POST localhost:8000/v1/hint -H "content-type: application/json" \
   -d '{"brief":"Write is_prime(n)","code":"def is_prime(n):\n    return True","rubric":"handles n<2, even numbers, and non-primes"}'
 ```
 
 Send the same request again with `"prior_hints": ["<the hint you just got>"]`
 to see the level escalate.
 
+### Run it in Docker
+
+```bash
+docker build -t mwalimu .
+docker run -p 8000:8000 -e ANTHROPIC_API_KEY=sk-... mwalimu
+```
+
+### Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Required. |
+| `MWALIMU_MODEL` | `claude-opus-5-5` | Model for hints and rubric checks. |
+| `MWALIMU_MAX_TOKENS` | `8000` | Includes thinking, so leave headroom beyond the hint length. |
+| `MWALIMU_LLM_TIMEOUT` | `60` | Seconds per model call attempt (2 retries). |
+| `WEB_CONCURRENCY` | `2` | Uvicorn worker processes (Docker only). |
+
+### Run the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests mock the model and cost nothing. They run on every push via
+GitHub Actions.
+
 ### Run the evals
 
 ```bash
 python -m evals.run_evals
+```
+
+These call the real model and cost money. In GitHub, run them from the
+Actions tab ("Live evals"); they need an `ANTHROPIC_API_KEY` repository
+secret.
+
+### Dependencies
+
+`requirements.in` lists the direct dependencies; `requirements.txt` is the
+fully pinned set, resolved on Python 3.12 (the Docker image). To change a
+dependency, edit `requirements.in` and regenerate:
+
+```bash
+docker run --rm -v "$PWD":/w -w /w python:3.12-slim \
+  sh -c "pip install -q -r requirements.in && pip freeze" > requirements.txt
 ```
 
 ## What's here
