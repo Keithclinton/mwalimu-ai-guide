@@ -24,7 +24,10 @@ def _looks_like_full_solution(hint: str, code: str) -> bool:
         def_match = re.search(rf"def\s+{re.escape(func_name)}\s*\([^)]*\)\s*:", hint)
         if def_match and "return" in hint[def_match.end():]:
             return True
-    return bool(re.search(r"```(?:python)?[^`]*return", hint, re.DOTALL))
+    # Pair fences up first; scanning from any ``` would let a closing fence
+    # start a "block" that runs into the prose after it.
+    blocks = re.findall(r"```(.*?)(?:```|$)", hint, re.DOTALL)
+    return any("return" in b for b in blocks)
 
 
 def check(scenario) -> tuple[bool, str]:

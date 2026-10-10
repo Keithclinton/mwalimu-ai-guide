@@ -1,11 +1,21 @@
 """FastAPI entrypoint. This layer is done — it validates input and calls the
 agent. You shouldn't need to change much here; the work is in agent.py."""
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.agent import run_agent
+from app.llm import LLMUnavailable
 
 app = FastAPI(title="Mwalimu", description="AI project-guide for coding learners")
+
+
+@app.exception_handler(LLMUnavailable)
+def llm_unavailable(request: Request, exc: LLMUnavailable):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The hint service is temporarily unavailable. Please try again."},
+    )
 
 
 class HintRequest(BaseModel):

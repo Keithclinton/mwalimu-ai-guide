@@ -35,6 +35,18 @@ class State(TypedDict):
 
 MAX_LEAK_RETRIES = 2  # attempts beyond the first before we give up gracefully
 
+# Returned instead of the drafted hint when every attempt leaked. Deliberately
+# generic: anything derived from the leaked drafts could still carry the answer.
+FALLBACK_HINT = (
+    "Try shrinking the problem: what should your function do for the simplest "
+    "possible input? Get that case working and run it, then add the next case."
+)
+
+# A complete fenced block, or an unclosed one running to the end (a reply cut
+# off at max_tokens). Non-greedy, so a closing fence is never mistaken for the
+# opening of the prose after it.
+_FENCED_BLOCK = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+
 
 # ---------------------------------------------------------------------------
 # Nodes
@@ -83,7 +95,9 @@ def _hint_leaks_solution(hint: str, code: str) -> bool:
         def_match = re.search(rf"def\s+{re.escape(func_name)}\s*\([^)]*\)\s*:", hint)
         if def_match and "return" in hint[def_match.end():]:
             return True
-    return "```" in hint and "return" in hint
+    # Only `return` inside a code block counts — a question like "what does
+    # your function return?" is a nudge, not a leak.
+    return any("return" in block for block in _FENCED_BLOCK.findall(hint))
 
 
 def leak_check(state: State) -> State:
@@ -134,8 +148,11 @@ def run_agent(brief: str, code: str, rubric: str, prior_hints: list[str]) -> dic
         "leak_retries": 0, "needs_retry": False,
     }
     final_state = _graph.invoke(state)
+    # Still leaking after the retry budget: don't ship the leaked draft.
+    # solved_leak_blocked stays true so the caller can see it happened.
+    hint = FALLBACK_HINT if final_state["solved_leak_blocked"] else final_state["hint"]
     return {
-        "hint": final_state["hint"],
+        "hint": hint,
         "hint_level": final_state["hint_level"],
         "solved_leak_blocked": final_state["solved_leak_blocked"],
     }
