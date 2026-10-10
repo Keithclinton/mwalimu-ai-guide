@@ -1,0 +1,7 @@
+# Direct dependencies. requirements.txt is the pinned lock generated from
+# this file on Python 3.12 -- see "Dependencies" in README.md.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+langgraph>=0.2
+anthropic>=0.125

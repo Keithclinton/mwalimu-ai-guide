@@ -1,24 +1,112 @@
 """Tools the agent can use."""
+import ast
 import os
 import re
 import secrets
 import subprocess
 import sys
 import textwrap
+from dataclasses import dataclass
+from typing import Optional
 
+from app import context
 from app.llm import call_llm
 
 # Test output ends up in the hint prompt. The end of a traceback is the useful
 # part; anything longer is either noise or someone stuffing the prompt.
 MAX_STDERR_CHARS = 500
 
-ASSERTION_SYSTEM_PROMPT = (
-    "You write Python `assert` statements that check a learner's function "
-    "against a rubric. Output ONLY the assert statements, one per line — no "
-    "explanation, no code fences, no function definition. Each line must be "
-    "a complete, directly-executable `assert <call>, \"<message>\"` calling "
-    "the function by name; assume the function is already defined above it."
+# Builtins a generated assert may call besides the learner's function, e.g.
+# `assert len(f("ab")) == 2`. None of them can reach the file system, the
+# network, or an object's attributes.
+SAFE_BUILTINS = frozenset({
+    "abs", "all", "any", "bool", "float", "int", "isinstance", "len", "list",
+    "max", "min", "round", "set", "sorted", "str", "sum", "tuple",
+})
+
+# Everything else — attribute access, lambdas, comprehensions, f-strings,
+# walrus, starred args — is rejected. Attribute access is the important one:
+# it's how `().__class__.__base__...` style escapes start.
+_ALLOWED_NODES = (
+    ast.Assert, ast.Call, ast.Compare, ast.BoolOp, ast.UnaryOp, ast.BinOp,
+    ast.Constant, ast.Tuple, ast.List, ast.Set, ast.Dict, ast.Subscript,
+    ast.Slice, ast.Name, ast.keyword, ast.Load,
+    ast.cmpop, ast.boolop, ast.unaryop, ast.operator,
 )
+
+
+# Statuses run_tests can report. decide_level branches on these, never on the
+# wording of the message.
+PASSED = "passed"        # ran, and every rubric assert passed
+UNCHECKED = "unchecked"  # ran without error, but no usable asserts this run
+FAILED = "failed"        # a rubric assert failed
+ERRORED = "errored"      # crashed, didn't parse, or exited before the asserts
+TIMEOUT = "timeout"      # hit the wall-clock limit
+EMPTY = "empty"          # nothing written yet
+
+
+@dataclass(frozen=True)
+class RunResult:
+    status: str
+    message: str  # human-readable; goes into the hint prompt
+
+
+def _function_name(brief: str, code: str) -> Optional[str]:
+    match = re.search(r"def\s+(\w+)\s*\(", code) or re.search(r"\b(\w+)\s*\([^)]*\)", brief)
+    return match.group(1) if match else None
+
+
+def _is_literal(node: ast.AST) -> bool:
+    try:
+        ast.literal_eval(node)
+        return True
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+
+
+def is_safe_assert(line: str, func_name: str) -> bool:
+    """True if `line` is a single assert that only calls the learner's
+    function (with literal arguments) and a few harmless builtins.
+
+    The asserts come from a model that has read the learner's code, so a
+    prompt injection in that code can steer what gets written — and these
+    lines are executed. Checking the prefix isn't enough:
+    `assert __import__("os").system(...)` starts with "assert " too."""
+    try:
+        tree = ast.parse(line)
+    except SyntaxError:
+        return False
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Assert):
+        return False
+    stmt = tree.body[0]
+    if stmt.msg is not None and not (
+        isinstance(stmt.msg, ast.Constant) and isinstance(stmt.msg.value, str)
+    ):
+        return False
+
+    calls_target = False
+    call_funcs = set()
+    for node in ast.walk(stmt.test):
+        if not isinstance(node, _ALLOWED_NODES):
+            return False
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name):
+                return False
+            if node.func.id == func_name:
+                args = [*node.args, *(k.value for k in node.keywords)]
+                if any(k.arg is None for k in node.keywords) or not all(map(_is_literal, args)):
+                    return False
+                calls_target = True
+            elif node.func.id not in SAFE_BUILTINS:
+                return False
+            call_funcs.add(id(node.func))
+    # A bare name anywhere other than the function position of a call (e.g.
+    # `assert os`) is a variable lookup we didn't vet.
+    for node in ast.walk(stmt.test):
+        if isinstance(node, ast.Name) and id(node) not in call_funcs:
+            return False
+    # `assert True` passes no matter what the learner wrote; it isn't a check.
+    return calls_target
 
 
 def _derive_assertions(brief: str, code: str, rubric: str) -> str:
@@ -34,22 +122,20 @@ def _derive_assertions(brief: str, code: str, rubric: str) -> str:
     name even when the learner's code doesn't define one yet — a rubric like
     "handles n<2, even numbers, and non-primes" doesn't always name the
     function, but the brief ("Write is_prime(n)...") usually does.
+
+    Every line the model returns goes through is_safe_assert before it can
+    run; anything else is dropped.
     """
-    match = re.search(r"def\s+(\w+)\s*\(", code) or re.search(r"\b(\w+)\s*\([^)]*\)", brief)
-    func_name = match.group(1) if match else "the function"
-    user = (
-        f"TASK: {brief}\n\n"
-        f"RUBRIC:\n{rubric}\n\n"
-        f"FUNCTION TO TEST: {func_name}\n\n"
-        f"LEARNER CODE (for the signature only — do not repeat it):\n{code}\n\n"
-        "Write 2-3 assert statements covering the rubric's requirements."
-    )
+    func_name = _function_name(brief, code)
+    if func_name is None:
+        return ""
+    system, user = context.for_assertions(brief, code, rubric, func_name)
     try:
-        raw = call_llm(ASSERTION_SYSTEM_PROMPT, user)
+        raw = call_llm(system, user)
     except Exception:
         return ""
     return "\n".join(
-        line.strip() for line in raw.splitlines() if line.strip().startswith("assert ")
+        line.strip() for line in raw.splitlines() if is_safe_assert(line.strip(), func_name)
     )
 
 
@@ -72,7 +158,7 @@ def _tail(text: str, limit: int = MAX_STDERR_CHARS) -> str:
     return text if len(text) <= limit else "..." + text[-limit:]
 
 
-def run_tests(brief: str, code: str, rubric: str) -> str:
+def run_tests(brief: str, code: str, rubric: str) -> RunResult:
     """Run the learner's code against assertions derived from the rubric and
     report what actually fails, so later hints are grounded in real behavior
     instead of a guess.
@@ -85,11 +171,8 @@ def run_tests(brief: str, code: str, rubric: str) -> str:
     """
     if not code.strip():
         # Deterministic, not LLM-dependent: nothing has been written yet, so
-        # there's nothing to execute. Phrased to match the "Code errored"
-        # prefix so decide_level's stuck-on-fundamentals check (which looks
-        # for that marker) catches this case too, instead of needing its own
-        # special case for "no code at all".
-        return "Code errored: no code has been written yet."
+        # there's nothing to execute.
+        return RunResult(EMPTY, "No code has been written yet.")
     assertions = _derive_assertions(brief, code, rubric)
     # Exit code 0 alone doesn't prove the asserts ran: sys.exit(0) in the
     # learner's code would skip them. Print a fresh random marker after the
@@ -107,19 +190,19 @@ def run_tests(brief: str, code: str, rubric: str) -> str:
             [sys.executable, "-I", "-c", program],
             capture_output=True, text=True, timeout=5, env=_child_env(),
         )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            last_line = stderr.splitlines()[-1] if stderr else "Unknown error"
-            if last_line.startswith("AssertionError"):
-                return f"Rubric check failed: {_tail(last_line)}"
-            return f"Code errored:\n{_tail(stderr)}"
-        if marker not in result.stdout:
-            return "Code errored: the program exited before the rubric checks could run."
-        if not assertions:
-            return "Code runs without error. Rubric-derived assertions unavailable this run."
-        return "Code runs and passes all rubric-derived checks."
     except subprocess.TimeoutExpired:
-        return "Code timed out (possible infinite loop)."
+        return RunResult(TIMEOUT, "Code timed out (possible infinite loop).")
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        last_line = stderr.splitlines()[-1] if stderr else "Unknown error"
+        if last_line.startswith("AssertionError"):
+            return RunResult(FAILED, f"Rubric check failed: {_tail(last_line)}")
+        return RunResult(ERRORED, f"Code errored:\n{_tail(stderr)}")
+    if marker not in result.stdout:
+        return RunResult(ERRORED, "Code errored: the program exited before the rubric checks could run.")
+    if not assertions:
+        return RunResult(UNCHECKED, "Code runs without error. Rubric-derived assertions unavailable this run.")
+    return RunResult(PASSED, "Code runs and passes all rubric-derived checks.")
 
 
 def get_rubric(project_id: str) -> str:
