@@ -1,10 +1,16 @@
 """Tools the agent can use."""
+import os
 import re
+import secrets
 import subprocess
 import sys
 import textwrap
 
 from app.llm import call_llm
+
+# Test output ends up in the hint prompt. The end of a traceback is the useful
+# part; anything longer is either noise or someone stuffing the prompt.
+MAX_STDERR_CHARS = 500
 
 ASSERTION_SYSTEM_PROMPT = (
     "You write Python `assert` statements that check a learner's function "
@@ -47,6 +53,25 @@ def _derive_assertions(brief: str, code: str, rubric: str) -> str:
     )
 
 
+def _child_env() -> dict:
+    """The environment learner code runs with: just enough to start Python.
+    Inheriting ours would hand it ANTHROPIC_API_KEY, and anything it can read
+    it can print to stderr — which goes into the hint prompt."""
+    if sys.platform == "win32":
+        # Python on Windows can fail to start without SYSTEMROOT, and without
+        # SYSTEMDRIVE Windows writes shell caches to a literal "%SystemDrive%"
+        # folder in the working directory.
+        return {
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
+            "SYSTEMDRIVE": os.environ.get("SYSTEMDRIVE", "C:"),
+        }
+    return {"PATH": "/usr/bin:/bin"}
+
+
+def _tail(text: str, limit: int = MAX_STDERR_CHARS) -> str:
+    return text if len(text) <= limit else "..." + text[-limit:]
+
+
 def run_tests(brief: str, code: str, rubric: str) -> str:
     """Run the learner's code against assertions derived from the rubric and
     report what actually fails, so later hints are grounded in real behavior
@@ -66,18 +91,30 @@ def run_tests(brief: str, code: str, rubric: str) -> str:
         # special case for "no code at all".
         return "Code errored: no code has been written yet."
     assertions = _derive_assertions(brief, code, rubric)
-    program = textwrap.dedent(code) + "\n\n" + assertions + "\n"
+    # Exit code 0 alone doesn't prove the asserts ran: sys.exit(0) in the
+    # learner's code would skip them. Print a fresh random marker after the
+    # asserts and only count the run as passing if it shows up. It's new
+    # every run, so the learner's code can't print it ahead of time.
+    marker = secrets.token_hex(16)
+    program = (
+        textwrap.dedent(code) + "\n\n" + assertions + "\n"
+        + f"print({marker!r})\n"
+    )
     try:
         result = subprocess.run(
-            [sys.executable, "-c", program],
-            capture_output=True, text=True, timeout=5,
+            # -I: ignore PYTHON* env vars and user site-packages, and keep the
+            # working directory off sys.path.
+            [sys.executable, "-I", "-c", program],
+            capture_output=True, text=True, timeout=5, env=_child_env(),
         )
         if result.returncode != 0:
             stderr = result.stderr.strip()
             last_line = stderr.splitlines()[-1] if stderr else "Unknown error"
             if last_line.startswith("AssertionError"):
-                return f"Rubric check failed: {last_line}"
-            return f"Code errored:\n{stderr}"
+                return f"Rubric check failed: {_tail(last_line)}"
+            return f"Code errored:\n{_tail(stderr)}"
+        if marker not in result.stdout:
+            return "Code errored: the program exited before the rubric checks could run."
         if not assertions:
             return "Code runs without error. Rubric-derived assertions unavailable this run."
         return "Code runs and passes all rubric-derived checks."

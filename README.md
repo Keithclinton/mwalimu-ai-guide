@@ -60,10 +60,11 @@ learner code + brief + rubric
   heuristic check (`agent._hint_leaks_solution`) looks for a `def` matching
   the learner's function followed by a `return` — i.e. "did this read like
   a working implementation, not a nudge?" If so, the graph retries
-  `draft_hint` at a demoted level up to `MAX_LEAK_RETRIES` times before
-  giving up and returning the last attempt with `solved_leak_blocked: true`
-  so the caller knows. A heuristic instead of a second LLM judgment call is
-  a deliberate cost/latency tradeoff, not an oversight.
+  `draft_hint` at a demoted level up to `MAX_LEAK_RETRIES` times. If every
+  attempt leaks, it returns a generic fallback hint instead of the leaked
+  draft, with `solved_leak_blocked: true` so the caller knows. A heuristic
+  instead of a second LLM judgment call is a deliberate cost/latency
+  tradeoff, not an oversight.
 - **Rubric-grounded assessment, not just "does it crash."** Rubrics are
   free text ("handles n<2, even numbers, and non-primes") — turning that
   into runnable checks needs the model, so `tools._derive_assertions` asks
@@ -82,8 +83,10 @@ learner code + brief + rubric
 ## Safety note: executing learner code
 
 `tools.run_tests` executes untrusted code — the learner's submission, plus
-`assert` statements an LLM wrote — in a subprocess with a 5-second timeout.
-That stops one bad run from hanging the server; it is **not** a sandbox (no
+`assert` statements an LLM wrote — in a subprocess with a 5-second timeout
+and a stripped-down environment (so it can't read `ANTHROPIC_API_KEY`), and
+caps the stderr that flows back into the hint prompt. That stops one bad run
+from hanging the server or leaking the key; it is **not** a sandbox (no
 filesystem/network/CPU isolation). `NOTES.md` has the full writeup of what's
 missing and how I'd actually sandbox this for production.
 
