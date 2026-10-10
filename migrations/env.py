@@ -9,7 +9,9 @@ from app.db import Base, database_url
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Leave loggers that already exist alone, e.g. when migrations run
+    # in-process from the test suite.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Every replica runs migrations when it starts. On Postgres this lock makes
 # the others wait for the first instead of racing it.

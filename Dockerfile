@@ -12,9 +12,10 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
 
-# Learner code runs in a subprocess of this server until it moves to a
-# separate sandbox (#3), so the server never runs as root, and /app stays
-# owned by root so that code can't rewrite the server.
+# Learner code runs in E2B sandboxes in production. A deployment without
+# E2B_API_KEY runs it as a subprocess here instead (meant for development),
+# so the server never runs as root, and /app stays owned by root so that
+# code can't rewrite it.
 RUN useradd --create-home --uid 10001 mwalimu
 USER mwalimu
 
