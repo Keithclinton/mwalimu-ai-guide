@@ -156,4 +156,5 @@ def run_agent(brief: str, code: str, rubric: str, prior_hints: list[str]) -> dic
         "hint": hint,
         "hint_level": final_state["hint_level"],
         "solved_leak_blocked": final_state["solved_leak_blocked"],
+        "test_status": final_state["test_status"],
     }

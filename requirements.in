@@ -5,3 +5,6 @@ uvicorn[standard]>=0.29
 pydantic>=2.6
 langgraph>=0.2
 anthropic>=0.125
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+alembic>=1.13

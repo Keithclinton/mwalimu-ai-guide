@@ -12,6 +12,9 @@ Configuration (environment variables):
 """
 import functools
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator, Optional
 
 import anthropic
 
@@ -31,6 +34,24 @@ class LLMUnavailable(Exception):
     """The model couldn't give us usable text — an API error, a timeout, a
     refusal, or a response with no text block. main.py turns this into a 503
     so callers get a clean "try again" instead of a stack trace."""
+
+
+# Token totals for the request being handled. A hint request makes several
+# model calls (rubric checks, then one or more hint drafts) from inside the
+# agent graph; this collects all of them without threading a counter through
+# every function in between.
+_usage: ContextVar[Optional[dict]] = ContextVar("mwalimu_usage", default=None)
+
+
+@contextmanager
+def track_usage() -> Iterator[dict]:
+    """Collect token usage from every call_llm made inside the block."""
+    totals = {"input_tokens": 0, "output_tokens": 0}
+    token = _usage.set(totals)
+    try:
+        yield totals
+    finally:
+        _usage.reset(token)
 
 
 @functools.cache
@@ -61,6 +82,11 @@ def call_llm(system: str, user: str) -> str:
             msg = _client().messages.create(**params)
     except anthropic.APIError as e:
         raise LLMUnavailable(str(e)) from e
+    totals = _usage.get()
+    if totals is not None and msg.usage is not None:
+        # Billed even when the reply turns out to be unusable.
+        totals["input_tokens"] += msg.usage.input_tokens or 0
+        totals["output_tokens"] += msg.usage.output_tokens or 0
     if msg.stop_reason == "refusal":
         raise LLMUnavailable("model declined the request")
     # content[0] isn't necessarily text: with thinking on, the first block is
