@@ -1,40 +1,9 @@
 import json
-from types import SimpleNamespace
 
-import anthropic
-import httpx2 as httpx  # anthropic 1.x is built on httpx2; plain httpx objects are rejected
 import pytest
-from fastapi.testclient import TestClient
 
-from app import agent, llm
-from app.main import app
-
-
-def _message(content, stop_reason="end_turn"):
-    return {
-        "id": "msg_1", "type": "message", "role": "assistant", "model": llm.MODEL,
-        "content": content, "stop_reason": stop_reason, "stop_sequence": None,
-        "usage": {"input_tokens": 1, "output_tokens": 1},
-    }
-
-
-@pytest.fixture
-def api(monkeypatch):
-    """A real SDK client wired to a fake transport, so the request the SDK
-    actually builds can be inspected."""
-    seen = SimpleNamespace(requests=[], status=200, body=_message([{"type": "text", "text": " hi "}]))
-
-    def handler(request):
-        seen.requests.append(request)
-        return httpx.Response(seen.status, json=seen.body)
-
-    client = anthropic.Anthropic(
-        api_key="sk-test",
-        max_retries=0,
-        http_client=anthropic.DefaultHttpxClient(transport=httpx.MockTransport(handler)),
-    )
-    monkeypatch.setattr(llm, "_client", lambda: client)
-    return seen
+from app import llm
+from tests.conftest import message as _message
 
 
 def test_returns_text(api):
@@ -83,14 +52,11 @@ def test_api_error_raises(api):
         llm.call_llm("s", "u")
 
 
-def test_hint_endpoint_returns_503_when_model_unavailable(monkeypatch):
-    def unavailable(*args, **kwargs):
-        raise llm.LLMUnavailable("down")
-
-    monkeypatch.setattr(agent, "call_llm", unavailable)
-    monkeypatch.setattr("app.tools.call_llm", unavailable)
-    response = TestClient(app).post(
-        "/v1/hint",
-        json={"brief": "Write f(x)", "code": "def f(x):\n    return x\n", "rubric": "r"},
-    )
-    assert response.status_code == 503
+def test_usage_is_collected_inside_track_usage(api):
+    api.body = {**_message([{"type": "text", "text": "x"}]), "usage": {"input_tokens": 7, "output_tokens": 3}}
+    with llm.track_usage() as totals:
+        llm.call_llm("s", "u")
+        llm.call_llm("s", "u")
+    assert totals == {"input_tokens": 14, "output_tokens": 6}
+    llm.call_llm("s", "u")  # outside the block: not counted, no error
+    assert totals == {"input_tokens": 14, "output_tokens": 6}

@@ -93,7 +93,85 @@ from hanging the server or leaking the key; it is **not** a sandbox (no
 filesystem/network/CPU isolation). `NOTES.md` has the full writeup of what's
 missing and how I'd actually sandbox this for production.
 
-## Run it
+## Using the API
+
+Every request needs a customer API key:
+`Authorization: Bearer mw_live_...`.
+
+### `POST /v1/hint`
+
+```bash
+curl -X POST https://<your-domain>/v1/hint \
+  -H "Authorization: Bearer mw_live_..." -H "content-type: application/json" \
+  -d '{"brief": "Write is_prime(n)",
+       "code": "def is_prime(n):\n    return True",
+       "rubric": "handles n<2, even numbers, and non-primes",
+       "project_id": "primes-101",
+       "learner_id": "student-42"}'
+```
+
+| Field | Limit | |
+|---|---|---|
+| `brief` | 1–4,000 chars | What the learner is building. |
+| `code` | up to 20,000 chars | Their current code. Not stored. |
+| `rubric` | 1–4,000 chars | What "correct" looks like. |
+| `project_id`, `learner_id` | 1–128 chars | Your own identifiers. Hint history is kept per customer, project and learner. |
+
+Response:
+
+```json
+{"hint": "What should is_prime return for n = 1?", "hint_level": 1,
+ "solved_leak_blocked": false, "test_status": "failed"}
+```
+
+- `hint_level` goes 1 → 3 as the learner asks again about the same
+  project. History reaches back `MWALIMU_SESSION_HOURS` (24h) and starts
+  over once their code passes.
+- `test_status` is one of `passed`, `unchecked`, `failed`, `errored`,
+  `timeout` or `empty`.
+
+| Status | Meaning |
+|---|---|
+| 401 | Missing, invalid or revoked API key. |
+| 422 | Invalid body (missing field, over a limit). |
+| 429 | Over the per-minute rate limit; retry after `Retry-After` seconds. |
+| 503 | The model is unavailable; safe to retry. The reason is in the server logs. |
+
+### `GET /v1/usage?month=YYYY-MM`
+
+Hints, failed requests, leak blocks and tokens for the calling customer,
+for one month (default: current month, UTC).
+
+## Deploy on Railway
+
+> **Not ready for paying customers until #3 is done.** Learner code still
+> runs inside the API container (as a non-root user, without the API key in
+> its environment) rather than in an isolated sandbox.
+
+1. Create a Railway project from this GitHub repo. Railway builds the
+   `Dockerfile`.
+2. Add a **PostgreSQL** database to the project.
+3. In the API service's variables, set:
+   - `DATABASE_URL` = `${{ Postgres.DATABASE_URL }}`
+   - `ANTHROPIC_API_KEY` = your key
+   - optionally anything from [Configuration](#configuration)
+4. In the service settings, set the healthcheck path to `/health` and
+   generate a public domain.
+5. Deploy. Database migrations run automatically when the container starts.
+6. Create your first customer. Enable public networking on the Postgres
+   service, copy its `DATABASE_PUBLIC_URL`, and run the admin command from
+   your machine:
+
+   ```bash
+   docker build -t mwalimu .
+   docker run --rm -e DATABASE_URL="<DATABASE_PUBLIC_URL>" mwalimu \
+     python -m app.admin create-customer "Acme Academy" --rate-limit 60
+   ```
+
+   The API key is printed once and never stored. Other commands:
+   `create-key`, `revoke-key`, `list-customers`, `usage` (see `app/admin.py`).
+
+## Run it locally
 
 ```bash
 git clone <this-repo-url>
@@ -106,33 +184,25 @@ pip install -r requirements.txt
 
 export ANTHROPIC_API_KEY=sk-...  # Windows PowerShell: $env:ANTHROPIC_API_KEY = "sk-..."
 
+alembic upgrade head             # creates mwalimu.db (SQLite) without DATABASE_URL
+python -m app.admin create-customer "Local testing"   # prints an API key
 uvicorn app.main:app --reload
 ```
 
-```bash
-# in another terminal
-curl -X POST localhost:8000/v1/hint -H "content-type: application/json" \
-  -d '{"brief":"Write is_prime(n)","code":"def is_prime(n):\n    return True","rubric":"handles n<2, even numbers, and non-primes"}'
-```
-
-Send the same request again with `"prior_hints": ["<the hint you just got>"]`
-to see the level escalate.
-
-### Run it in Docker
-
-```bash
-docker build -t mwalimu .
-docker run -p 8000:8000 -e ANTHROPIC_API_KEY=sk-... mwalimu
-```
+Then call `localhost:8000/v1/hint` as above with that key. Send the same
+request again to see the level escalate.
 
 ### Configuration
 
 | Variable | Default | |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required. |
+| `DATABASE_URL` | `sqlite:///mwalimu.db` | Postgres in production. |
 | `MWALIMU_MODEL` | `claude-opus-5-5` | Model for hints and rubric checks. |
 | `MWALIMU_MAX_TOKENS` | `8000` | Includes thinking, so leave headroom beyond the hint length. |
 | `MWALIMU_LLM_TIMEOUT` | `60` | Seconds per model call attempt (2 retries). |
+| `MWALIMU_SESSION_HOURS` | `24` | How far back a learner's hint history counts. |
+| `PORT` | `8000` | Set by Railway automatically (Docker only). |
 | `WEB_CONCURRENCY` | `2` | Uvicorn worker processes (Docker only). |
 
 ### Run the tests
@@ -176,7 +246,13 @@ docker run --rm -v "$PWD":/w -w /w python:3.12-slim \
    assertions inside the safety guard described above.
 4. `app/llm.py` — the single Anthropic call site, shared by `agent.py` and
    `tools.py`.
-5. `evals/run_evals.py` + `evals/scenarios.json` — 8 scenarios, adversarial
+5. `app/main.py` — the HTTP API: auth, input limits, rate limiting, and
+   recording each request.
+6. `app/db.py`, `app/accounts.py`, `app/records.py` — customers, API keys,
+   and the hint history used for sessions, rate limits and metering.
+   Schema changes go in `migrations/` (Alembic).
+7. `app/admin.py` — admin commands for customers and keys.
+8. `evals/run_evals.py` + `evals/scenarios.json` — 8 scenarios, adversarial
    ones included, checking both leak-avoidance and level escalation.
 
 ## Interview prep — the BROKE-IT log
