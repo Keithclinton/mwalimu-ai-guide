@@ -19,6 +19,9 @@ from app.db import Base, SessionLocal, engine  # noqa: E402
 @pytest.fixture(autouse=True)
 def _api_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-SECRET-123")
+    # Tests run learner code locally unless they opt into the (fake) sandbox.
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    monkeypatch.setenv("MWALIMU_SANDBOX", "local")
 
 
 @pytest.fixture(autouse=True)

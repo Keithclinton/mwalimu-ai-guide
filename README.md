@@ -38,8 +38,8 @@ learner code + brief + rubric
 ```
 
 - **`assess`** runs the learner's code against a couple of rubric-derived
-  `assert` statements in a sandboxed subprocess, and records what actually
-  failed.
+  `assert` statements in an isolated E2B sandbox, and records what
+  actually failed.
 - **`decide_level`** picks hint level 1–3: escalates with how many hints
   the learner has already burned through, plus a bump if the code doesn't
   even run (a different, more fundamental kind of stuck than a logic bug).
@@ -85,13 +85,21 @@ learner code + brief + rubric
 
 ## Safety note: executing learner code
 
-`tools.run_tests` executes untrusted code — the learner's submission, plus
-`assert` statements an LLM wrote — in a subprocess with a 5-second timeout
-and a stripped-down environment (so it can't read `ANTHROPIC_API_KEY`), and
-caps the stderr that flows back into the hint prompt. That stops one bad run
-from hanging the server or leaking the key; it is **not** a sandbox (no
-filesystem/network/CPU isolation). `NOTES.md` has the full writeup of what's
-missing and how I'd actually sandbox this for production.
+`tools.run_tests` executes untrusted code: the learner's submission, plus
+`assert` statements an LLM wrote (validated with `ast` first).
+
+- **In production** each run gets a fresh [E2B](https://e2b.dev) microVM with
+  its own kernel, no internet access and none of the server's environment
+  variables, killed as soon as the run ends. Nothing the code does can reach
+  the API server, its secrets, or the network.
+- **If E2B is unavailable**, the code isn't run at all: the hint is written
+  without test results (`test_status: "unchecked"`) and the reason is
+  logged. It never falls back to running code on the server.
+- **Locally** (no `E2B_API_KEY`), code runs in a subprocess with a 5-second
+  timeout and a stripped-down environment. That's for development only; the
+  server logs a warning on startup when it's in this mode.
+
+Either way, the stderr that flows back into the hint prompt is capped.
 
 ## Using the API
 
@@ -144,20 +152,20 @@ for one month (default: current month, UTC).
 
 ## Deploy on Railway
 
-> **Not ready for paying customers until #3 is done.** Learner code still
-> runs inside the API container (as a non-root user, without the API key in
-> its environment) rather than in an isolated sandbox.
-
 1. Create a Railway project from this GitHub repo. Railway builds the
    `Dockerfile`.
 2. Add a **PostgreSQL** database to the project.
 3. In the API service's variables, set:
    - `DATABASE_URL` = `${{ Postgres.DATABASE_URL }}`
    - `ANTHROPIC_API_KEY` = your key
+   - `E2B_API_KEY` = your E2B key (from the E2B dashboard). **Required for
+     customers**: without it, learner code runs inside the API container.
    - optionally anything from [Configuration](#configuration)
 4. In the service settings, set the healthcheck path to `/health` and
    generate a public domain.
 5. Deploy. Database migrations run automatically when the container starts.
+   Check the deploy logs for `learner code runs in E2B sandboxes`; a warning
+   about code running on this server means `E2B_API_KEY` isn't set.
 6. Create your first customer. Enable public networking on the Postgres
    service, copy its `DATABASE_PUBLIC_URL`, and run the admin command from
    your machine:
@@ -202,6 +210,8 @@ request again to see the level escalate.
 | `MWALIMU_MAX_TOKENS` | `8000` | Includes thinking, so leave headroom beyond the hint length. |
 | `MWALIMU_LLM_TIMEOUT` | `60` | Seconds per model call attempt (2 retries). |
 | `MWALIMU_SESSION_HOURS` | `24` | How far back a learner's hint history counts. |
+| `E2B_API_KEY` | — | Runs learner code in E2B sandboxes. Required in production. |
+| `MWALIMU_SANDBOX` | `e2b` if `E2B_API_KEY` is set, else `local` | `local` runs code on the server; development only. |
 | `PORT` | `8000` | Set by Railway automatically (Docker only). |
 | `WEB_CONCURRENCY` | `2` | Uvicorn worker processes (Docker only). |
 
@@ -212,8 +222,13 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests mock the model and cost nothing. They run on every push via
-GitHub Actions.
+The tests mock the model and E2B, and cost nothing. They run on every
+push via GitHub Actions. To check the real sandbox (a few seconds of E2B
+time):
+
+```bash
+E2B_API_KEY=e2b_... pytest tests/test_sandbox_live.py
+```
 
 ### Run the evals
 

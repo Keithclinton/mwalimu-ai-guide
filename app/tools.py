@@ -1,20 +1,43 @@
-"""Tools the agent can use."""
+"""Tools the agent can use.
+
+Configuration:
+    MWALIMU_SANDBOX   where learner code runs: "e2b" (an isolated microVM per
+                      run, no internet) or "local" (a subprocess on this
+                      server, for development only). Defaults to "e2b" when
+                      E2B_API_KEY is set, otherwise "local".
+    E2B_API_KEY       required for the e2b sandbox
+"""
 import ast
+import logging
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass
 from typing import Optional
 
+from e2b import (
+    CommandExitException,
+    Sandbox,
+    SandboxNotRunningException,
+    SandboxUnreachableException,
+    TimeoutException,
+)
+
 from app import context
 from app.llm import call_llm
+
+logger = logging.getLogger("uvicorn.error")
 
 # Test output ends up in the hint prompt. The end of a traceback is the useful
 # part; anything longer is either noise or someone stuffing the prompt.
 MAX_STDERR_CHARS = 500
+
+# Wall-clock limit for the learner's program, in seconds.
+RUN_TIMEOUT_SECONDS = 5
 
 # Builtins a generated assert may call besides the learner's function, e.g.
 # `assert len(f("ab")) == 2`. None of them can reach the file system, the
@@ -139,10 +162,83 @@ def _derive_assertions(brief: str, code: str, rubric: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class Execution:
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+class SandboxUnavailable(Exception):
+    """The sandbox couldn't run the code (E2B outage, rate limit, bad key).
+    The code is then not run at all; it never falls back to this server."""
+
+
+def sandbox_backend() -> str:
+    default = "e2b" if os.environ.get("E2B_API_KEY") else "local"
+    return os.environ.get("MWALIMU_SANDBOX", default).strip().lower()
+
+
+def _execute(program: str) -> Execution:
+    backend = sandbox_backend()
+    if backend == "e2b":
+        return _execute_in_e2b(program)
+    if backend == "local":
+        return _execute_locally(program)
+    raise ValueError(f"MWALIMU_SANDBOX must be 'e2b' or 'local', not {backend!r}")
+
+
+def _execute_in_e2b(program: str) -> Execution:
+    """Run the program in a fresh E2B microVM: its own kernel, no internet
+    access, none of our environment variables, killed as soon as the run
+    ends. Nothing the learner's code does can reach this server, our
+    secrets, or the network."""
+    path = "/tmp/program.py"
+    # `timeout` sends SIGTERM after RUN_TIMEOUT_SECONDS and SIGKILL 2s later,
+    # for code that ignores SIGTERM. The SDK timeout is a backstop.
+    command = f"timeout -k 2 {RUN_TIMEOUT_SECONDS} python3 -I {shlex.quote(path)}"
+    try:
+        with Sandbox.create(timeout=60, allow_internet_access=False) as sandbox:
+            sandbox.files.write(path, program)
+            try:
+                result = sandbox.commands.run(command, timeout=RUN_TIMEOUT_SECONDS + 10)
+            except CommandExitException as e:
+                # 124: timed out on SIGTERM; 137: needed SIGKILL.
+                return Execution(e.exit_code, e.stdout, e.stderr, timed_out=e.exit_code in (124, 137))
+            except (SandboxNotRunningException, SandboxUnreachableException):
+                # Subclasses of TimeoutException, but the sandbox failed, not
+                # the learner's code. Handled by the outer except.
+                raise
+            except TimeoutException:
+                return Execution(-1, "", "", timed_out=True)
+            return Execution(result.exit_code, result.stdout, result.stderr)
+    except Exception as e:
+        # The SDK's errors don't share a base class (AuthenticationException,
+        # ServiceBusyException and network errors sit outside
+        # SandboxException), and whatever went wrong, the answer is the same:
+        # don't run the code, and never fall back to running it here.
+        raise SandboxUnavailable(f"{type(e).__name__}: {e}") from e
+
+
+def _execute_locally(program: str) -> Execution:
+    """Development only: runs learner code as a subprocess of this server."""
+    try:
+        result = subprocess.run(
+            # -I: ignore PYTHON* env vars and user site-packages, and keep the
+            # working directory off sys.path.
+            [sys.executable, "-I", "-c", program],
+            capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS, env=_child_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return Execution(-1, "", "", timed_out=True)
+    return Execution(result.returncode, result.stdout, result.stderr)
+
+
 def _child_env() -> dict:
-    """The environment learner code runs with: just enough to start Python.
-    Inheriting ours would hand it ANTHROPIC_API_KEY, and anything it can read
-    it can print to stderr — which goes into the hint prompt."""
+    """The environment learner code runs with locally: just enough to start
+    Python. Inheriting ours would hand it ANTHROPIC_API_KEY, and anything it
+    can read it can print to stderr — which goes into the hint prompt."""
     if sys.platform == "win32":
         # Python on Windows can fail to start without SYSTEMROOT, and without
         # SYSTEMDRIVE Windows writes shell caches to a literal "%SystemDrive%"
@@ -164,10 +260,8 @@ def run_tests(brief: str, code: str, rubric: str) -> RunResult:
     instead of a guess.
 
     SAFETY: this executes untrusted, LLM-adjacent code (the learner's code,
-    plus assert statements an LLM wrote) on the host. Running it in a fresh
-    subprocess with a hard timeout stops an infinite loop or crash from
-    hanging or taking down the server process, but that is a minimum, not a
-    sandbox — see NOTES.md for what production needs beyond this.
+    plus assert statements an LLM wrote). In production it runs in an E2B
+    sandbox (see _execute_in_e2b); the local backend is for development.
     """
     if not code.strip():
         # Deterministic, not LLM-dependent: nothing has been written yet, so
@@ -184,15 +278,14 @@ def run_tests(brief: str, code: str, rubric: str) -> RunResult:
         + f"print({marker!r})\n"
     )
     try:
-        result = subprocess.run(
-            # -I: ignore PYTHON* env vars and user site-packages, and keep the
-            # working directory off sys.path.
-            [sys.executable, "-I", "-c", program],
-            capture_output=True, text=True, timeout=5, env=_child_env(),
-        )
-    except subprocess.TimeoutExpired:
+        result = _execute(program)
+    except SandboxUnavailable as e:
+        # Hint without running the code rather than fail the request.
+        logger.warning("sandbox unavailable: %s", e)
+        return RunResult(UNCHECKED, "The code couldn't be run this time, so there are no test results.")
+    if result.timed_out:
         return RunResult(TIMEOUT, "Code timed out (possible infinite loop).")
-    if result.returncode != 0:
+    if result.exit_code != 0:
         stderr = result.stderr.strip()
         last_line = stderr.splitlines()[-1] if stderr else "Unknown error"
         if last_line.startswith("AssertionError"):

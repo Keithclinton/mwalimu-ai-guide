@@ -8,3 +8,4 @@ anthropic>=0.125
 sqlalchemy>=2.0
 psycopg[binary]>=3.1
 alembic>=1.13
+e2b>=2.55

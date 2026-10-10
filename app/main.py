@@ -1,13 +1,15 @@
 """FastAPI entrypoint: authentication, input limits, rate limiting, and
 recording each request. The tutoring logic is in agent.py."""
 import logging
+import os
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import accounts, records
+from app import accounts, records, tools
 from app.accounts import Caller
 from app.agent import run_agent
 from app.db import HintRecord, SessionLocal, utcnow
@@ -15,7 +17,25 @@ from app.llm import LLMUnavailable, track_usage
 
 logger = logging.getLogger("uvicorn.error")
 
-app = FastAPI(title="Mwalimu", description="AI project-guide for coding learners")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    backend = tools.sandbox_backend()
+    if backend not in ("e2b", "local"):
+        raise RuntimeError(f"MWALIMU_SANDBOX must be 'e2b' or 'local', not {backend!r}")
+    if backend == "e2b" and not os.environ.get("E2B_API_KEY"):
+        logger.error("MWALIMU_SANDBOX=e2b but E2B_API_KEY is not set: learner code will not run")
+    elif backend == "e2b":
+        logger.info("learner code runs in E2B sandboxes")
+    else:
+        logger.warning(
+            "learner code runs ON THIS SERVER (MWALIMU_SANDBOX=%s). "
+            "Set E2B_API_KEY before serving real customers.", backend,
+        )
+    yield
+
+
+app = FastAPI(title="Mwalimu", description="AI project-guide for coding learners", lifespan=lifespan)
 
 # Generous for a learner's exercise, small enough that the API can't be used
 # as a general-purpose model proxy.
