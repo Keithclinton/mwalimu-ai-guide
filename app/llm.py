@@ -4,7 +4,8 @@ agent.py avoids a circular import between the two.
 
 Configuration (environment variables):
     ANTHROPIC_API_KEY     required
-    MWALIMU_MODEL         default claude-opus-5-5
+    MWALIMU_MODEL         default claude-opus-5-5 (ANTHROPIC_MODEL is also
+                          accepted; MWALIMU_MODEL wins if both are set)
     MWALIMU_MAX_TOKENS    default 8000. Thinking is on for current models and
                           counts against this, so it needs headroom beyond
                           the length of the hint itself.
@@ -18,7 +19,7 @@ from typing import Iterator, Optional
 
 import anthropic
 
-MODEL = os.environ.get("MWALIMU_MODEL", "claude-opus-5-5")
+MODEL = os.environ.get("MWALIMU_MODEL") or os.environ.get("ANTHROPIC_MODEL") or "claude-opus-5-5"
 MAX_TOKENS = int(os.environ.get("MWALIMU_MAX_TOKENS", "8000"))
 TIMEOUT_SECONDS = float(os.environ.get("MWALIMU_LLM_TIMEOUT", "60"))
 

@@ -66,13 +66,27 @@ def for_hint(state) -> tuple[str, str]:
     level = state["hint_level"]
     level_guide = {
         1: "Give the gentlest possible nudge. Ask a question, don't state the fix.",
-        2: "Point clearly at the concept or line that's wrong, but don't write the code.",
+        2: (
+            "Point clearly at the concept or line that's wrong, but don't write the code, "
+            "and don't spell out the fix itself (the exact condition, value or statement): "
+            "leave working that out to the learner."
+        ),
         3: "Give a concrete next step, still stopping short of the full solution.",
     }
+    guide = level_guide.get(level, level_guide[1])
+    # tools.PASSED (not imported: tools imports this module). When every
+    # rubric check passes there's nothing to hint at, and a model asked for
+    # a hint will otherwise invent a problem or an optional "improvement".
+    if state.get("test_status") == "passed":
+        guide = (
+            "Their code passes every rubric check. Tell them so in a sentence or two, "
+            "naming what they got right. Stop there: don't invent problems, and don't "
+            "suggest optional changes or improvements."
+        )
     system = (
         "You are Mwalimu, a coding tutor. You NEVER give the full solution. "
         "You give the smallest hint that helps the learner make the next move themselves. "
-        f"{level_guide.get(level, level_guide[1])} "
+        f"{guide} "
         + UNTRUSTED_INPUT_RULE
     )
     prior = "\n".join(f"- {h}" for h in state["prior_hints"]) or "(none yet)"
