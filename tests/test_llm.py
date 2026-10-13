@@ -18,7 +18,8 @@ def test_skips_a_leading_thinking_block(api):
     assert llm.call_llm("s", "u") == "the hint"
 
 
-def test_requests_refusal_fallback_for_supported_models(api):
+def test_requests_refusal_fallback_for_supported_models(api, monkeypatch):
+    monkeypatch.setattr(llm, "MODEL", "claude-opus-5-5")  # independent of any .env choice
     llm.call_llm("s", "u")
     request = api.requests[0]
     assert "server-side-fallback-2026-07-01" in request.headers["anthropic-beta"]

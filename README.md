@@ -190,7 +190,7 @@ source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps
 
 pip install -r requirements.txt
 
-export ANTHROPIC_API_KEY=sk-...  # Windows PowerShell: $env:ANTHROPIC_API_KEY = "sk-..."
+cp .env.example .env             # then fill in ANTHROPIC_API_KEY and E2B_API_KEY
 
 alembic upgrade head             # creates mwalimu.db (SQLite) without DATABASE_URL
 python -m app.admin create-customer "Local testing"   # prints an API key
@@ -233,12 +233,19 @@ E2B_API_KEY=e2b_... pytest tests/test_sandbox_live.py
 ### Run the evals
 
 ```bash
-python -m evals.run_evals
+python -m evals.run_evals --runs 3      # pass rate per scenario, plus the leak rate
+python -m evals.run_evals --show-hints  # also print every hint
+python -m evals.run_evals --no-judge    # skip the LLM judge (cheaper)
 ```
 
-These call the real model and cost money. In GitHub, run them from the
-Actions tab ("Live evals"); they need an `ANTHROPIC_API_KEY` repository
-secret.
+These call the real model and cost money. Each hint is checked by
+banned-fragment and code-block checks, then by an independent LLM judge
+(`evals/judge.py`, `MWALIMU_JUDGE_MODEL`, default `claude-sonnet-5-5`) that
+catches pseudocode and step-by-step walkthroughs. The model's output varies,
+so read pass rates over several runs, not a single pass. The **leak rate**
+(hints a learner would have seen that gave the answer away) is the number
+to track. In GitHub, run them from the Actions tab ("Live evals"); they need
+an `ANTHROPIC_API_KEY` repository secret.
 
 ### Dependencies
 
