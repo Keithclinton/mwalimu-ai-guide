@@ -22,7 +22,7 @@ def agent_says(monkeypatch):
 @pytest.fixture
 def judge_says(monkeypatch):
     def set_verdicts(*passed):
-        monkeypatch.setattr(run_evals, "judge", lambda scenario, hint: [
+        monkeypatch.setattr(run_evals, "judge", lambda scenario, hint, level=1: [
             (f"rule {i}", p, f"reason {i}") for i, p in enumerate(passed)
         ])
     return set_verdicts
@@ -81,6 +81,26 @@ def test_judge_errors_fail_every_rule(monkeypatch):
     verdicts = judge_module.judge({**SCENARIO, "judge_rules": ["extra"]}, "hint")
     assert len(verdicts) == 2
     assert not any(passed for _, passed, _ in verdicts)
+
+
+@pytest.mark.parametrize("level, rule", [
+    (1, judge_module.NO_LEAK_RULE),
+    (2, judge_module.NO_LEAK_RULE),
+    (3, judge_module.NO_LEAK_RULE_LEVEL_3),
+])
+def test_level_three_may_describe_the_last_step(monkeypatch, level, rule):
+    sent = {}
+
+    class Recorder:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                sent.update(kw)
+                raise RuntimeError("stop here")
+
+    monkeypatch.setattr(judge_module, "_client", lambda: Recorder)
+    judge_module.judge(SCENARIO, "hint", level)
+    assert rule in sent["messages"][0]["content"]
 
 
 def test_exit_status_reflects_leaks(agent_says, judge_says, monkeypatch, capsys):

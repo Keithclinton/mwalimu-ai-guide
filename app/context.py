@@ -71,7 +71,11 @@ def for_hint(state) -> tuple[str, str]:
             "and don't spell out the fix itself (the exact condition, value or statement): "
             "leave working that out to the learner."
         ),
-        3: "Give a concrete next step, still stopping short of the full solution.",
+        3: (
+            "Give a concrete next step, still stopping short of the full solution. "
+            "You may describe that step in words, even when it's the last piece "
+            "missing, but don't write it as code or pseudocode."
+        ),
     }
     guide = level_guide.get(level, level_guide[1])
     # tools.PASSED (not imported: tools imports this module). When every
