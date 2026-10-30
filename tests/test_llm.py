@@ -6,6 +6,13 @@ from app import llm
 from tests.conftest import message as _message
 
 
+def test_missing_api_key_is_unavailable_not_a_crash(api, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    with pytest.raises(llm.LLMUnavailable, match="ANTHROPIC_API_KEY"):
+        llm.call_llm("s", "u")
+    assert api.requests == []
+
+
 def test_returns_text(api):
     assert llm.call_llm("s", "u") == "hi"
 

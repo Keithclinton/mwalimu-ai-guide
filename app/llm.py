@@ -68,6 +68,9 @@ def _client() -> anthropic.Anthropic:
 
 
 def call_llm(system: str, user: str) -> str:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        # A clean 503 with the reason in the logs, not a KeyError and a 500.
+        raise LLMUnavailable("ANTHROPIC_API_KEY is not set")
     params = dict(
         model=MODEL,
         max_tokens=MAX_TOKENS,
