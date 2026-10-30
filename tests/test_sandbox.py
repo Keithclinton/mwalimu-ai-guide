@@ -167,6 +167,13 @@ def test_startup_flags_e2b_without_a_key(monkeypatch, caplog):
     assert "E2B_API_KEY is not set" in caplog.text
 
 
+def test_startup_flags_a_missing_anthropic_key(monkeypatch, caplog):
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    with caplog.at_level(logging.WARNING), TestClient(app):
+        pass
+    assert "ANTHROPIC_API_KEY is not set" in caplog.text
+
+
 def test_startup_refuses_an_unknown_backend(monkeypatch):
     monkeypatch.setenv("MWALIMU_SANDBOX", "docker")
     with pytest.raises(RuntimeError), TestClient(app):

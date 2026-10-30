@@ -20,6 +20,8 @@ logger = logging.getLogger("uvicorn.error")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.error("ANTHROPIC_API_KEY is not set: every hint request will fail with 503")
     backend = tools.sandbox_backend()
     if backend not in ("e2b", "local"):
         raise RuntimeError(f"MWALIMU_SANDBOX must be 'e2b' or 'local', not {backend!r}")

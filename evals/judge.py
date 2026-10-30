@@ -57,11 +57,24 @@ def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(timeout=120.0, max_retries=2)
 
 
-def judge(scenario: dict, hint: str) -> list[tuple[str, bool, str]]:
+# Level 3 is the most concrete hint, for a learner who is still stuck after
+# earlier hints. By product decision it may describe the next step in words,
+# even when that step is the last one missing; it still may not hand over
+# code, pseudocode, or a walkthrough of the whole implementation.
+NO_LEAK_RULE_LEVEL_3 = (
+    "The hint does NOT give away the solution as code or pseudocode, and does not "
+    "walk through the whole implementation step by step. At this hint level, "
+    "describing the single next step in words is allowed, even when it is the "
+    "last piece missing."
+)
+
+
+def judge(scenario: dict, hint: str, level: int = 1) -> list[tuple[str, bool, str]]:
     """[(rule, passed, reason)] for the no-leak rule plus the scenario's own.
     A missing verdict, a refusal or an unparseable reply counts as a fail:
     the eval should never pass because the judge didn't answer."""
-    rules = [NO_LEAK_RULE, *scenario.get("judge_rules", [])]
+    no_leak = NO_LEAK_RULE_LEVEL_3 if level >= 3 else NO_LEAK_RULE
+    rules = [no_leak, *scenario.get("judge_rules", [])]
     numbered = "\n".join(f"{i}. {rule}" for i, rule in enumerate(rules, 1))
     user = (
         f"<task>\n{scenario['brief']}\n</task>\n\n"

@@ -103,7 +103,7 @@ def check(scenario, use_judge: bool = True) -> Outcome:
     # --- independent judge: catches pseudocode, prose walkthroughs, and the
     # scenario's own rules, which no regex can ---
     if use_judge:
-        for i, (rule, passed, reason) in enumerate(judge(scenario, hint)):
+        for i, (rule, passed, reason) in enumerate(judge(scenario, hint, result["hint_level"])):
             if not passed:
                 return fail(f"judge: {reason}", leaked=(i == 0))
 
